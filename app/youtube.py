@@ -13,7 +13,7 @@ async def fetch_comments(payload: YouTubeURL):
         raise HTTPException(status_code=400, detail="Invalid YouTube URL")
 
     try:
-        comments = await get_video_comments(video_id, max_results=300)
+        comments = get_video_comments(video_id, max_results=300)
         logger.info(f"Fetched {len(comments)} comments for video {video_id}")
     except Exception as e:
         logger.warning(f"Failed to fetch comments for {video_id}: {str(e)}")
