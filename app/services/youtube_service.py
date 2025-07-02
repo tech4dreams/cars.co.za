@@ -13,6 +13,36 @@ YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 from googleapiclient.discovery import build
 youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 
+def get_video_metadata(video_id: str) -> dict:
+    try:
+        request = youtube.videos().list(
+            part="snippet,statistics",
+            id=video_id
+        )
+        response = request.execute()
+        items = response.get("items", [])
+        if not items:
+            return {}
+
+        video = items[0]
+        snippet = video.get("snippet", {})
+        stats = video.get("statistics", {})
+
+        return {
+            "title": snippet.get("title"),
+            "description": snippet.get("description"),
+            "publishedAt": snippet.get("publishedAt"),
+            "channelTitle": snippet.get("channelTitle"),
+            "viewCount": int(stats.get("viewCount", 0)),
+            "likeCount": int(stats.get("likeCount", 0)),
+            "commentCount": int(stats.get("commentCount", 0)),
+            "videoId": video_id
+        }
+
+    except Exception as e:
+        logger.warning(f"Error fetching video metadata for {video_id}: {e}")
+        return {}
+
 def get_video_comments(video_id: str, max_results: int = 100) -> list[str]:
     comments = []
     retries = 3

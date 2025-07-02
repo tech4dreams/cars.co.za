@@ -7,6 +7,20 @@ import logging
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+from app.services.youtube_service import get_video_metadata
+
+@router.post("/metadata")
+def fetch_metadata(payload: YouTubeURL):
+    video_id = payload.extract_video_id()
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+
+    metadata = get_video_metadata(video_id)
+    if not metadata:
+        raise HTTPException(status_code=404, detail="Video not found or data unavailable")
+
+    return metadata
+
 @router.post("/comments", response_model=YouTubeCommentsResponse)
 async def fetch_comments(payload: YouTubeURL):
     video_id = payload.extract_video_id()
