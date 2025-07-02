@@ -1,11 +1,8 @@
-# app/main.py
+# Entry point
 from fastapi import FastAPI
-from app.sentiment import sentiment_router
+from app.sentiment import router as sentiment_router
+from app.youtube import router as youtube_router
 
-app = FastAPI(title="Cars Sentiment Backend", version="0.1.0")
-
+app = FastAPI()
 app.include_router(sentiment_router, prefix="/analyze")
-
-@app.get("/")
-async def root():
-    return {"message": "Welcome to Cars Sentiment Backend"}
+app.include_router(youtube_router, prefix="/youtube")
