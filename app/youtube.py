@@ -1,6 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from app.services.youtube_service import get_video_comments, get_video_transcript
-from app.schemas import YouTubeURL, YouTubeCommentsResponse
+from app.schemas import (
+    YouTubeURL,
+    YouTubeCommentsResponse,
+    YouTubeTranscriptResponse,
+    YouTubeMetadataResponse
+)
 from fastapi.responses import JSONResponse
 import logging
 
@@ -10,7 +15,7 @@ logger = logging.getLogger(__name__)
 from app.services.youtube_service import get_video_metadata
 
 @router.post("/metadata")
-def fetch_metadata(payload: YouTubeURL):
+def fetch_metadata(payload: YouTubeURL, response_model=YouTubeMetadataResponse):
     video_id = payload.extract_video_id()
     if not video_id:
         raise HTTPException(status_code=400, detail="Invalid YouTube URL")
@@ -40,7 +45,7 @@ async def fetch_comments(payload: YouTubeURL):
 
     return {"video_id": video_id, "comments": comments}
 
-@router.post("/transcript")
+@router.post("/transcript", response_model=YouTubeTranscriptResponse)
 def fetch_transcript(payload: YouTubeURL):
     video_id = payload.extract_video_id()
     if not video_id:
