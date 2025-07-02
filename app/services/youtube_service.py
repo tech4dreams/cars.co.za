@@ -1,6 +1,7 @@
 import time
 import logging
 from googleapiclient.errors import HttpError
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from dotenv import load_dotenv
 import os
 
@@ -55,3 +56,18 @@ def get_video_comments(video_id: str, max_results: int = 100) -> list[str]:
 
     logger.info(f"Fetched {len(comments)} comments for video {video_id}")
     return comments
+
+def get_video_transcript(video_id: str) -> str:
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+        full_text = " ".join([entry["text"] for entry in transcript])
+        return full_text
+    except TranscriptsDisabled:
+        logger.info(f"Transcripts are disabled for video {video_id}")
+        return ""
+    except NoTranscriptFound:
+        logger.info(f"No transcript found for video {video_id}")
+        return ""
+    except Exception as e:
+        logger.warning(f"Error fetching transcript for video {video_id}: {e}")
+        return ""
