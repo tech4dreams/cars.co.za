@@ -29,3 +29,25 @@ class YouTubeMetadataResponse(BaseModel):
     viewCount: int
     likeCount: int
     commentCount: int
+
+class AnalyzeVideoRequest(BaseModel):
+    video_url: str
+
+# Fixed to match nlp_service output
+class SentimentResult(BaseModel):
+    text: str  # Changed from 'comment' to 'text'
+    label: str  # Changed from 'sentiment' to 'label'
+    score: float  # Changed from 'confidence' to 'score'
+    error: Optional[str] = None  # Added error field
+
+class CommentCategories(BaseModel):
+    most_interesting: List[str]
+    hot_takes: List[str]
+    questions: List[str]
+
+class AnalyzeVideoResponse(BaseModel):
+    video_id: str
+    sentiment_results: List[SentimentResult]
+    categories: CommentCategories
+    report: str
+    metadata: Optional[YouTubeMetadataResponse] = None
