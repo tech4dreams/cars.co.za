@@ -2,20 +2,14 @@ from fastapi import APIRouter, HTTPException
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from app.schemas import TextBatch
-import os
-from dotenv import load_dotenv
-import logging
+from app.config import settings, API_ENDPOINTS, get_log_config
+import logging.config
 
 youtube_router = APIRouter()
+logging.config.dictConfig(get_log_config())
 logger = logging.getLogger(__name__)
 
-load_dotenv("C:/Users/Seth.Valentine/cars.co.za/.env")
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-
-if not YOUTUBE_API_KEY:
-    raise ValueError("YOUTUBE_API_KEY not found in .env file")
-
-youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+youtube = build("youtube", "v3", developerKey=settings.youtube_api_key)
 
 @youtube_router.get("/youtube/comments", response_model=TextBatch)
 async def get_youtube_comments(video_id: str):
@@ -28,7 +22,7 @@ async def get_youtube_comments(video_id: str):
         request = youtube.commentThreads().list(
             part="snippet",
             videoId=video_id,
-            maxResults=100,
+            maxResults=settings.max_comments_per_video,
             textFormat="plainText"
         )
         response = request.execute()
@@ -37,7 +31,6 @@ async def get_youtube_comments(video_id: str):
             comment = item["snippet"]["topLevelComment"]["snippet"]["textDisplay"]
             comments.append(comment)
 
-        # Fetch video details for likes/dislikes and transcription
         video_request = youtube.videos().list(
             part="snippet,statistics",
             id=video_id
@@ -60,3 +53,4 @@ async def get_youtube_comments(video_id: str):
     except Exception as e:
         logger.error(f"Error fetching comments: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching comments: {str(e)}")
+    

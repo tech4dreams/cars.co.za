@@ -1,10 +1,10 @@
 from typing import List, Dict, Optional
 import os
-from dotenv import load_dotenv
+from app.config import settings, MODEL_CONFIGS, get_log_config
 import cohere
 from transformers import pipeline, AutoTokenizer
 from retry import retry
-import logging
+import logging.config
 import re
 import spacy
 
@@ -12,7 +12,7 @@ import spacy
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.config.dictConfig(get_log_config())
 logger = logging.getLogger(__name__)
 
 # Try importing spacy, with fallback if it fails
@@ -24,44 +24,33 @@ except Exception as e:
     logger.error(f"spaCy import or model loading failed: {e}")
     SPACY_AVAILABLE = False
 
-# Load environment variables
-load_dotenv("C:/Users/Seth.Valentine/cars.co.za/.env")
-COHERE_API_KEY = os.getenv("COHERE_API_KEY")
-if not COHERE_API_KEY:
-    logger.error("COHERE_API_KEY not found in .env file")
-    raise ValueError("COHERE_API_KEY not found in .env file")
-
 # Initialize clients
 try:
-    model_name = "distilbert-base-uncased-finetuned-sst-2-english"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    sentiment_analyzer = pipeline("sentiment-analysis", model=model_name, tokenizer=tokenizer)
+    model_config = MODEL_CONFIGS["sentiment"]
+    tokenizer = AutoTokenizer.from_pretrained(model_config["model_name"], cache_dir=model_config["cache_dir"])
+    sentiment_analyzer = pipeline("sentiment-analysis", model=model_config["model_name"], tokenizer=tokenizer)
     logger.info("Sentiment analyzer loaded successfully")
 except Exception as e:
     logger.error(f"Failed to load sentiment analyzer: {e}")
     # Fallback to a simpler model
     try:
         model_name = "nlptown/bert-base-multilingual-uncased-sentiment"
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=model_config["cache_dir"])
         sentiment_analyzer = pipeline("sentiment-analysis", model=model_name, tokenizer=tokenizer)
         logger.info("Fallback sentiment analyzer loaded successfully")
     except Exception as e:
         logger.error(f"Failed to load fallback sentiment analyzer: {e}")
         raise
 
-co = cohere.Client(COHERE_API_KEY)
+co = cohere.Client(settings.cohere_api_key)
 
 def analyze_sentiment(texts: List[str], batch_size: int = 50) -> List[Dict[str, any]]:
-    """
-    Perform sentiment analysis using HuggingFace's transformers with batch processing.
-    Adds neutral sentiment for low-confidence predictions.
-    """
     try:
         results = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            # Truncate texts to max_length (512 tokens)
-            truncated_batch = [tokenizer.decode(tokenizer.encode(text, max_length=512, truncation=True)) for text in batch]
+            # Truncate texts to max_length
+            truncated_batch = [tokenizer.decode(tokenizer.encode(text, max_length=settings.max_comment_length, truncation=True)) for text in batch]
             for text, trunc_text in zip(batch, truncated_batch):
                 if text != trunc_text:
                     logger.warning(f"Text truncated due to length: {text[:50]}...")
@@ -90,9 +79,6 @@ def analyze_sentiment(texts: List[str], batch_size: int = 50) -> List[Dict[str, 
         ]
 
 def extract_keywords(texts: List[str]) -> List[Dict[str, any]]:
-    """
-    Extract keywords from texts using spaCy.
-    """
     results = []
     for text in texts:
         keywords = []
@@ -106,9 +92,6 @@ def extract_keywords(texts: List[str]) -> List[Dict[str, any]]:
     return results
 
 def find_questions(texts: List[str]) -> List[Dict[str, any]]:
-    """
-    Identify questions in texts using spaCy or heuristic.
-    """
     question_words = r"^(why|what|when|where|who|how|is|are|does|do|did|can|could|should|would)\b"
     results = []
     for text in texts:
@@ -131,9 +114,6 @@ def find_questions(texts: List[str]) -> List[Dict[str, any]]:
     return results
 
 def categorize_comments(texts: List[str]) -> Dict[str, List[str]]:
-    """
-    Categorize comments into Most Interesting, Hot Takes, and Questions.
-    """
     most_interesting = []
     hot_takes = []
     questions = []
@@ -142,7 +122,6 @@ def categorize_comments(texts: List[str]) -> Dict[str, List[str]]:
     question_words = r"^(why|what|when|where|who|how|is|are|does|do|did|can|could|should|would)\b"
 
     for text in texts:
-        # Questions
         if SPACY_AVAILABLE:
             try:
                 doc = nlp(text)
@@ -165,7 +144,6 @@ def categorize_comments(texts: List[str]) -> Dict[str, List[str]]:
                 questions.append(text)
                 continue
 
-        # Hot Takes: High-confidence sentiment, negation, or strong language
         try:
             sentiment = sentiment_analyzer(text)[0]
             has_negation = False
@@ -183,7 +161,6 @@ def categorize_comments(texts: List[str]) -> Dict[str, List[str]]:
         except Exception as e:
             logger.error(f"Sentiment analysis for categorization error: {e}")
 
-        # Most Interesting: Default for non-questions, non-hot-takes with moderate sentiment
         if 0.6 <= sentiment["score"] <= 0.9:
             most_interesting.append(text)
 
@@ -201,23 +178,17 @@ def generate_content_report(
     sentiment_results: List[Dict[str, any]],
     categorized_comments: Dict[str, List[str]]
 ) -> Dict[str, any]:
-    """
-    Generate a comprehensive report using Cohere.
-    """
     try:
-        # Truncate transcription to avoid Cohere token limits
         if transcription and len(transcription) > 1000:
             transcription = transcription[:1000] + "..."
             logger.warning("Transcription truncated to 1000 characters for Cohere processing")
 
-        # Calculate sentiment distribution
         sentiment_counts = {"Positive": 0, "Neutral": 0, "Negative": 0}
         for s in sentiment_results:
             sentiment_counts[s["sentiment"]] += 1
         total = sum(sentiment_counts.values())
         sentiment_summary = {k: (v / total * 100) if total > 0 else 0 for k, v in sentiment_counts.items()}
 
-        # Prepare prompt for Cohere
         prompt = f"""
         Generate a comprehensive report for a car review video with the following data:
         - Transcription: {transcription or 'Not provided'}
@@ -232,14 +203,13 @@ def generate_content_report(
         Summarize viewer sentiment and suggest actionable improvements for future content creation.
         """
         response = co.generate(
-            model="command",
+            model=settings.cohere_model,
             prompt=prompt,
             max_tokens=500,
             temperature=0.7
         )
         summary = response.generations[0].text.strip()
 
-        # Generate actionable insights
         insights = []
         if sentiment_summary["Negative"] > 20:
             insights.append("Address negative feedback in future videos, e.g., clarify common complaints.")
@@ -264,4 +234,4 @@ def generate_content_report(
             "categorized_comments": categorized_comments,
             "actionable_insights": ["Check Cohere API key and network connection, then retry."]
         }
-    
+        
