@@ -29,24 +29,31 @@ async def get_youtube_comments(video_id: str):
 
         for item in response.get("items", []):
             comment = item["snippet"]["topLevelComment"]["snippet"]["textDisplay"]
-            comments.append(comment)
+            if isinstance(comment, str) and comment.strip():
+                comments.append(comment)
+            else:
+                logger.warning(f"Skipping invalid comment for video ID: {video_id}")
 
         video_request = youtube.videos().list(
             part="snippet,statistics",
             id=video_id
         )
         video_response = video_request.execute()
+        if not video_response.get("items"):
+            logger.error(f"No video data found for video ID: {video_id}")
+            raise HTTPException(status_code=404, detail="Video not found")
+
         video_data = video_response["items"][0]
         likes = int(video_data["statistics"].get("likeCount", 0))
         dislikes = int(video_data["statistics"].get("dislikeCount", 0))
         transcription = video_data["snippet"].get("description", "")
 
-        return {
-            "texts": comments,
-            "transcription": transcription,
-            "likes": likes,
-            "dislikes": dislikes
-        }
+        return TextBatch(
+            texts=comments,
+            transcription=transcription,
+            likes=likes,
+            dislikes=dislikes
+        )
     except HttpError as e:
         logger.error(f"YouTube API error: {e}")
         raise HTTPException(status_code=500, detail=f"YouTube API error: {str(e)}")

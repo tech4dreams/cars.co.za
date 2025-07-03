@@ -7,6 +7,7 @@ from retry import retry
 import logging.config
 import re
 import spacy
+import emoji
 
 # Suppress transformers warnings
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
@@ -44,28 +45,48 @@ except Exception as e:
 
 co = cohere.Client(settings.cohere_api_key)
 
+def preprocess_text(text: str) -> str:
+    """Convert emojis to text and handle invalid inputs."""
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    return emoji.demojize(text.strip())
+
 def analyze_sentiment(texts: List[str], batch_size: int = 50) -> List[Dict[str, any]]:
     try:
         results = []
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            # Truncate texts to max_length
-            truncated_batch = [tokenizer.decode(tokenizer.encode(text, max_length=settings.max_comment_length, truncation=True)) for text in batch]
-            for text, trunc_text in zip(batch, truncated_batch):
-                if text != trunc_text:
-                    logger.warning(f"Text truncated due to length: {text[:50]}...")
-            batch_results = sentiment_analyzer(truncated_batch)
-            for text, result in zip(batch, batch_results):
-                sentiment = result["label"].capitalize()
-                confidence = result["score"]
-                # Adjust for neutral sentiment
-                if confidence < 0.95:
-                    sentiment = "Neutral"
-                results.append({
-                    "text": text,
-                    "sentiment": sentiment,
-                    "confidence": confidence
+        valid_texts = [preprocess_text(text) for text in texts]
+        for i in range(0, len(valid_texts), batch_size):
+            batch = valid_texts[i:i + batch_size]
+            # Filter out empty strings
+            non_empty_batch = [text for text in batch if text]
+            empty_indices = [i + j for j, text in enumerate(batch) if not text]
+            if non_empty_batch:
+                truncated_batch = [tokenizer.decode(tokenizer.encode(text, max_length=settings.max_comment_length, truncation=True)) for text in non_empty_batch]
+                for text, trunc_text in zip(non_empty_batch, truncated_batch):
+                    if text != trunc_text:
+                        logger.warning(f"Text truncated due to length: {text[:50]}...")
+                batch_results = sentiment_analyzer(truncated_batch)
+                for text, result in zip(non_empty_batch, batch_results):
+                    sentiment = result["label"].capitalize()
+                    confidence = round(result["score"], 2)
+                    if confidence < 0.95:
+                        sentiment = "Neutral"
+                    results.append({
+                        "text": text,
+                        "sentiment": sentiment,
+                        "confidence": confidence
+                    })
+            # Add default results for empty texts
+            for idx in empty_indices:
+                results.insert(idx, {
+                    "text": texts[idx],
+                    "sentiment": "Neutral",
+                    "confidence": 0.5
                 })
+        # Ensure results match input length
+        if len(results) != len(texts):
+            logger.error(f"Sentiment results length {len(results)} does not match input length {len(texts)}")
+            raise ValueError("Text alignment mismatch in sentiment analysis")
         return results
     except Exception as e:
         logger.error(f"Sentiment analysis error: {e}", exc_info=True)
@@ -81,35 +102,37 @@ def analyze_sentiment(texts: List[str], batch_size: int = 50) -> List[Dict[str, 
 def extract_keywords(texts: List[str]) -> List[Dict[str, any]]:
     results = []
     for text in texts:
+        processed_text = preprocess_text(text)
         keywords = []
-        if SPACY_AVAILABLE:
+        if processed_text and SPACY_AVAILABLE:
             try:
-                doc = nlp(text)
-                keywords = [token.text.lower() for token in doc if token.pos_ in ["NOUN", "ADJ", "PROPN"] and not token.is_stop]
+                doc = nlp(processed_text)
+                keywords = [token.text.lower() for token in doc if token.pos_ in ["NOUN", "ADJ", "PROPN"] and not token.is_stop and not emoji.is_emoji(token.text)]
             except Exception as e:
-                logger.error(f"Keyword extraction error: {e}")
+                logger.error(f"Keyword extraction error for text '{text[:50]}...': {e}")
         results.append({"text": text, "keywords": keywords or ["car", "review"]})
     return results
 
 def find_questions(texts: List[str]) -> List[Dict[str, any]]:
-    question_words = r"^(why|what|when|where|who|how|is|are|does|do|did|can|could|should|would)\b"
+    question_words = r"^(why|what|when|where|who|how|is|are|does|do|did|can|could|should|would)\b.*\?$"
     results = []
     for text in texts:
+        processed_text = preprocess_text(text)
         is_question = False
-        if SPACY_AVAILABLE:
+        if processed_text and SPACY_AVAILABLE:
             try:
-                doc = nlp(text)
+                doc = nlp(processed_text)
                 if any(token.text == "?" for token in doc):
                     is_question = True
                 elif any(token.dep_ == "aux" and token.i == 0 for token in doc):
                     is_question = True
-                elif re.match(question_words, text.lower(), re.IGNORECASE):
+                elif re.match(question_words, processed_text.lower(), re.IGNORECASE):
                     is_question = True
             except Exception as e:
-                logger.error(f"Question detection error: {e}")
-                is_question = "?" in text or bool(re.match(question_words, text.lower(), re.IGNORECASE))
+                logger.error(f"Question detection error for text '{text[:50]}...': {e}")
+                is_question = "?" in processed_text or bool(re.match(question_words, processed_text.lower(), re.IGNORECASE))
         else:
-            is_question = "?" in text or bool(re.match(question_words, text.lower(), re.IGNORECASE))
+            is_question = "?" in processed_text or bool(re.match(question_words, processed_text.lower(), re.IGNORECASE))
         results.append({"text": text, "is_question": is_question})
     return results
 
@@ -119,38 +142,39 @@ def categorize_comments(texts: List[str]) -> Dict[str, List[str]]:
     questions = []
 
     strong_words = {"best", "worst", "amazing", "terrible", "love", "hate", "fantastic", "awful", "superb", "disappointed", "leading", "dominate"}
-    question_words = r"^(why|what|when|where|who|how|is|are|does|do|did|can|could|should|would)\b"
+    question_words = r"^(why|what|when|where|who|how|is|are|does|do|did|can|could|should|would)\b.*\?$"
 
     for text in texts:
-        if SPACY_AVAILABLE:
+        processed_text = preprocess_text(text)
+        if processed_text and SPACY_AVAILABLE:
             try:
-                doc = nlp(text)
+                doc = nlp(processed_text)
                 if any(token.text == "?" for token in doc):
                     questions.append(text)
                     continue
                 elif any(token.dep_ == "aux" and token.i == 0 for token in doc):
                     questions.append(text)
                     continue
-                elif re.match(question_words, text.lower(), re.IGNORECASE):
+                elif re.match(question_words, processed_text.lower(), re.IGNORECASE):
                     questions.append(text)
                     continue
             except Exception as e:
-                logger.error(f"spaCy processing error: {e}")
-                if "?" in text or bool(re.match(question_words, text.lower(), re.IGNORECASE)):
+                logger.error(f"spaCy processing error for text '{text[:50]}...': {e}")
+                if "?" in processed_text or bool(re.match(question_words, processed_text.lower(), re.IGNORECASE)):
                     questions.append(text)
                     continue
         else:
-            if "?" in text or bool(re.match(question_words, text.lower(), re.IGNORECASE)):
+            if "?" in processed_text or bool(re.match(question_words, processed_text.lower(), re.IGNORECASE)):
                 questions.append(text)
                 continue
 
         try:
-            sentiment = sentiment_analyzer(text)[0]
+            sentiment = sentiment_analyzer(processed_text)[0]
             has_negation = False
             has_strong_language = False
-            if SPACY_AVAILABLE:
+            if processed_text and SPACY_AVAILABLE:
                 try:
-                    doc = nlp(text)
+                    doc = nlp(processed_text)
                     has_negation = any(token.dep_ == "neg" for token in doc)
                     has_strong_language = any(token.text.lower() in strong_words for token in doc)
                 except:
@@ -234,4 +258,4 @@ def generate_content_report(
             "categorized_comments": categorized_comments,
             "actionable_insights": ["Check Cohere API key and network connection, then retry."]
         }
-        
+    
