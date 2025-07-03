@@ -1,45 +1,62 @@
 from fastapi import APIRouter, HTTPException
-from app.schemas import YouTubeURL, YouTubeCommentsResponse, YouTubeTranscriptResponse
-from app.services.youtube_service import extract_video_id, get_video_metadata, get_video_comments, get_video_transcript
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from app.schemas import TextBatch
+import os
+from dotenv import load_dotenv
 import logging
 
-router = APIRouter()
+youtube_router = APIRouter()
 logger = logging.getLogger(__name__)
 
-@router.post("/youtube/metadata", response_model=dict)
-async def get_youtube_metadata(payload: YouTubeURL):
-    try:
-        video_id = extract_video_id(payload.url)
-        if not video_id:
-            raise ValueError("Invalid YouTube URL")
-        metadata = get_video_metadata(video_id)
-        if "error" in metadata:
-            raise ValueError(metadata["error"])
-        return metadata
-    except Exception as e:
-        logger.error(f"Metadata fetch error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+load_dotenv("C:/Users/Seth.Valentine/cars.co.za/.env")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
-@router.post("/youtube/comments", response_model=YouTubeCommentsResponse)
-async def get_youtube_comments(payload: YouTubeURL):
-    try:
-        video_id = extract_video_id(payload.url)
-        if not video_id:
-            raise ValueError("Invalid YouTube URL")
-        comments = get_video_comments(video_id)
-        return {"comments": comments}
-    except Exception as e:
-        logger.error(f"Comments fetch error: {e}")
-        return {"comments": [], "error": str(e)}
+if not YOUTUBE_API_KEY:
+    raise ValueError("YOUTUBE_API_KEY not found in .env file")
 
-@router.post("/youtube/transcript", response_model=YouTubeTranscriptResponse)
-async def get_youtube_transcript(payload: YouTubeURL):
+youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+
+@youtube_router.get("/youtube/comments", response_model=TextBatch)
+async def get_youtube_comments(video_id: str):
+    """
+    Fetch YouTube comments for a given video ID.
+    """
     try:
-        video_id = extract_video_id(payload.url)
-        if not video_id:
-            raise ValueError("Invalid YouTube URL")
-        transcript = get_video_transcript(video_id)
-        return {"transcript": transcript}
+        logger.info(f"Fetching comments for video ID: {video_id}")
+        comments = []
+        request = youtube.commentThreads().list(
+            part="snippet",
+            videoId=video_id,
+            maxResults=100,
+            textFormat="plainText"
+        )
+        response = request.execute()
+
+        for item in response.get("items", []):
+            comment = item["snippet"]["topLevelComment"]["snippet"]["textDisplay"]
+            comments.append(comment)
+
+        # Fetch video details for likes/dislikes and transcription
+        video_request = youtube.videos().list(
+            part="snippet,statistics",
+            id=video_id
+        )
+        video_response = video_request.execute()
+        video_data = video_response["items"][0]
+        likes = int(video_data["statistics"].get("likeCount", 0))
+        dislikes = int(video_data["statistics"].get("dislikeCount", 0))
+        transcription = video_data["snippet"].get("description", "")
+
+        return {
+            "texts": comments,
+            "transcription": transcription,
+            "likes": likes,
+            "dislikes": dislikes
+        }
+    except HttpError as e:
+        logger.error(f"YouTube API error: {e}")
+        raise HTTPException(status_code=500, detail=f"YouTube API error: {str(e)}")
     except Exception as e:
-        logger.error(f"Transcript fetch error: {e}")
-        return {"transcript": "", "error": str(e)}
+        logger.error(f"Error fetching comments: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching comments: {str(e)}")

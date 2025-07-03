@@ -2,10 +2,11 @@ from typing import List, Dict, Optional
 import os
 from dotenv import load_dotenv
 import cohere
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer
 from retry import retry
 import logging
 import re
+import spacy
 
 # Suppress transformers warnings
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
@@ -14,67 +15,83 @@ os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load spaCy with fallback
-SPACY_AVAILABLE = False
-nlp = None
+# Try importing spacy, with fallback if it fails
 try:
-    import spacy
     nlp = spacy.load("en_core_web_sm")
     SPACY_AVAILABLE = True
     logger.info("spaCy loaded successfully")
 except Exception as e:
     logger.error(f"spaCy import or model loading failed: {e}")
+    SPACY_AVAILABLE = False
 
 # Load environment variables
 load_dotenv("C:/Users/Seth.Valentine/cars.co.za/.env")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 if not COHERE_API_KEY:
+    logger.error("COHERE_API_KEY not found in .env file")
     raise ValueError("COHERE_API_KEY not found in .env file")
 
-# Initialize cohere client
-co = cohere.Client(COHERE_API_KEY)
+# Initialize clients
+try:
+    model_name = "distilbert-base-uncased-finetuned-sst-2-english"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    sentiment_analyzer = pipeline("sentiment-analysis", model=model_name, tokenizer=tokenizer)
+    logger.info("Sentiment analyzer loaded successfully")
+except Exception as e:
+    logger.error(f"Failed to load sentiment analyzer: {e}")
+    # Fallback to a simpler model
+    try:
+        model_name = "nlptown/bert-base-multilingual-uncased-sentiment"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        sentiment_analyzer = pipeline("sentiment-analysis", model=model_name, tokenizer=tokenizer)
+        logger.info("Fallback sentiment analyzer loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load fallback sentiment analyzer: {e}")
+        raise
 
-# Lazy load sentiment analyzer
-sentiment_analyzer = None
-def get_sentiment_analyzer():
-    global sentiment_analyzer
-    if sentiment_analyzer is None:
-        try:
-            sentiment_analyzer = pipeline(
-                "sentiment-analysis",
-                model="distilbert-base-uncased-finetuned-sst-2-english",
-                clean_up_tokenization_spaces=True
-            )
-            logger.info("Sentiment analyzer loaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to load sentiment analyzer: {e}")
-            raise
-    return sentiment_analyzer
+co = cohere.Client(COHERE_API_KEY)
 
 def analyze_sentiment(texts: List[str], batch_size: int = 50) -> List[Dict[str, any]]:
     """
-    Perform sentiment analysis with batch processing. Labels low-confidence predictions as Neutral.
+    Perform sentiment analysis using HuggingFace's transformers with batch processing.
+    Adds neutral sentiment for low-confidence predictions.
     """
     try:
-        analyzer = get_sentiment_analyzer()
         results = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            batch_results = analyzer(batch)
+            # Truncate texts to max_length (512 tokens)
+            truncated_batch = [tokenizer.decode(tokenizer.encode(text, max_length=512, truncation=True)) for text in batch]
+            for text, trunc_text in zip(batch, truncated_batch):
+                if text != trunc_text:
+                    logger.warning(f"Text truncated due to length: {text[:50]}...")
+            batch_results = sentiment_analyzer(truncated_batch)
             for text, result in zip(batch, batch_results):
                 sentiment = result["label"].capitalize()
                 confidence = result["score"]
+                # Adjust for neutral sentiment
                 if confidence < 0.95:
                     sentiment = "Neutral"
-                results.append({"text": text, "sentiment": sentiment, "confidence": confidence})
+                results.append({
+                    "text": text,
+                    "sentiment": sentiment,
+                    "confidence": confidence
+                })
         return results
     except Exception as e:
-        logger.error(f"Sentiment analysis error: {e}")
-        return [{"text": text, "sentiment": "Neutral", "confidence": 0.5} for text in texts]
+        logger.error(f"Sentiment analysis error: {e}", exc_info=True)
+        return [
+            {
+                "text": text,
+                "sentiment": "Neutral",
+                "confidence": 0.5
+            }
+            for text in texts
+        ]
 
 def extract_keywords(texts: List[str]) -> List[Dict[str, any]]:
     """
-    Extract keywords using spaCy or fallback to defaults.
+    Extract keywords from texts using spaCy.
     """
     results = []
     for text in texts:
@@ -82,70 +99,98 @@ def extract_keywords(texts: List[str]) -> List[Dict[str, any]]:
         if SPACY_AVAILABLE:
             try:
                 doc = nlp(text)
-                keywords = [token.text.lower() for token in doc if token.pos_ in ["NOUN", "ADJ"] and not token.is_stop]
+                keywords = [token.text.lower() for token in doc if token.pos_ in ["NOUN", "ADJ", "PROPN"] and not token.is_stop]
             except Exception as e:
                 logger.error(f"Keyword extraction error: {e}")
         results.append({"text": text, "keywords": keywords or ["car", "review"]})
     return results
 
-def categorize_comments(texts: List[str]) -> Dict[str, List[str]]:
+def find_questions(texts: List[str]) -> List[Dict[str, any]]:
     """
-    Categorize comments into Most Interesting, Hot Takes, and Questions.
-    Also returns question detection results for consistency.
+    Identify questions in texts using spaCy or heuristic.
     """
-    most_interesting = []
-    hot_takes = []
-    questions = []
-    question_results = []
     question_words = r"^(why|what|when|where|who|how|is|are|does|do|did|can|could|should|would)\b"
-
+    results = []
     for text in texts:
         is_question = False
         if SPACY_AVAILABLE:
             try:
                 doc = nlp(text)
-                if any(token.text == "?" for token in doc) or \
-                   any(token.dep_ == "aux" and token.i == 0 for token in doc) or \
-                   re.match(question_words, text.lower(), re.IGNORECASE):
+                if any(token.text == "?" for token in doc):
                     is_question = True
-                    questions.append(text)
+                elif any(token.dep_ == "aux" and token.i == 0 for token in doc):
+                    is_question = True
+                elif re.match(question_words, text.lower(), re.IGNORECASE):
+                    is_question = True
             except Exception as e:
-                logger.error(f"spaCy processing error: {e}")
+                logger.error(f"Question detection error: {e}")
                 is_question = "?" in text or bool(re.match(question_words, text.lower(), re.IGNORECASE))
         else:
             is_question = "?" in text or bool(re.match(question_words, text.lower(), re.IGNORECASE))
-        
-        question_results.append({"text": text, "is_question": is_question})
-        
-        if is_question:
-            continue
+        results.append({"text": text, "is_question": is_question})
+    return results
 
+def categorize_comments(texts: List[str]) -> Dict[str, List[str]]:
+    """
+    Categorize comments into Most Interesting, Hot Takes, and Questions.
+    """
+    most_interesting = []
+    hot_takes = []
+    questions = []
+
+    strong_words = {"best", "worst", "amazing", "terrible", "love", "hate", "fantastic", "awful", "superb", "disappointed", "leading", "dominate"}
+    question_words = r"^(why|what|when|where|who|how|is|are|does|do|did|can|could|should|would)\b"
+
+    for text in texts:
+        # Questions
+        if SPACY_AVAILABLE:
+            try:
+                doc = nlp(text)
+                if any(token.text == "?" for token in doc):
+                    questions.append(text)
+                    continue
+                elif any(token.dep_ == "aux" and token.i == 0 for token in doc):
+                    questions.append(text)
+                    continue
+                elif re.match(question_words, text.lower(), re.IGNORECASE):
+                    questions.append(text)
+                    continue
+            except Exception as e:
+                logger.error(f"spaCy processing error: {e}")
+                if "?" in text or bool(re.match(question_words, text.lower(), re.IGNORECASE)):
+                    questions.append(text)
+                    continue
+        else:
+            if "?" in text or bool(re.match(question_words, text.lower(), re.IGNORECASE)):
+                questions.append(text)
+                continue
+
+        # Hot Takes: High-confidence sentiment, negation, or strong language
         try:
-            analyzer = get_sentiment_analyzer()
-            sentiment = analyzer(text)[0]
+            sentiment = sentiment_analyzer(text)[0]
             has_negation = False
+            has_strong_language = False
             if SPACY_AVAILABLE:
                 try:
                     doc = nlp(text)
                     has_negation = any(token.dep_ == "neg" for token in doc)
+                    has_strong_language = any(token.text.lower() in strong_words for token in doc)
                 except:
                     pass
-            if sentiment["score"] > 0.9 or has_negation:
+            if sentiment["score"] > 0.9 or has_negation or has_strong_language:
                 hot_takes.append(text)
                 continue
-            if 0.6 <= sentiment["score"] <= 0.9:
-                most_interesting.append(text)
         except Exception as e:
             logger.error(f"Sentiment analysis for categorization error: {e}")
-            most_interesting.append(text)  # Default to most_interesting on error
+
+        # Most Interesting: Default for non-questions, non-hot-takes with moderate sentiment
+        if 0.6 <= sentiment["score"] <= 0.9:
+            most_interesting.append(text)
 
     return {
-        "categorized": {
-            "most_interesting": most_interesting,
-            "hot_takes": hot_takes,
-            "questions": questions
-        },
-        "questions": question_results
+        "most_interesting": most_interesting,
+        "hot_takes": hot_takes,
+        "questions": questions
     }
 
 @retry(tries=3, delay=1, backoff=2)
@@ -157,36 +202,53 @@ def generate_content_report(
     categorized_comments: Dict[str, List[str]]
 ) -> Dict[str, any]:
     """
-    Generate a report using Cohere with sentiment summary and insights.
+    Generate a comprehensive report using Cohere.
     """
     try:
+        # Truncate transcription to avoid Cohere token limits
+        if transcription and len(transcription) > 1000:
+            transcription = transcription[:1000] + "..."
+            logger.warning("Transcription truncated to 1000 characters for Cohere processing")
+
+        # Calculate sentiment distribution
         sentiment_counts = {"Positive": 0, "Neutral": 0, "Negative": 0}
         for s in sentiment_results:
             sentiment_counts[s["sentiment"]] += 1
         total = sum(sentiment_counts.values())
         sentiment_summary = {k: (v / total * 100) if total > 0 else 0 for k, v in sentiment_counts.items()}
 
+        # Prepare prompt for Cohere
         prompt = f"""
-        Car review video report:
+        Generate a comprehensive report for a car review video with the following data:
         - Transcription: {transcription or 'Not provided'}
-        - Likes: {likes}, Dislikes: {dislikes}
-        - Sentiment: {sentiment_summary}
-        - Comments:
+        - Likes: {likes}
+        - Dislikes: {dislikes}
+        - Sentiment Analysis: {sentiment_summary}
+        - Categorized Comments:
           - Most Interesting: {', '.join(categorized_comments['most_interesting']) or 'None'}
           - Hot Takes: {', '.join(categorized_comments['hot_takes']) or 'None'}
           - Questions: {', '.join(categorized_comments['questions']) or 'None'}
-        Summarize sentiment and suggest improvements.
+
+        Summarize viewer sentiment and suggest actionable improvements for future content creation.
         """
-        response = co.generate(model="command", prompt=prompt, max_tokens=500, temperature=0.7)
+        response = co.generate(
+            model="command",
+            prompt=prompt,
+            max_tokens=500,
+            temperature=0.7
+        )
         summary = response.generations[0].text.strip()
 
+        # Generate actionable insights
         insights = []
         if sentiment_summary["Negative"] > 20:
-            insights.append("Address negative feedback in future videos.")
+            insights.append("Address negative feedback in future videos, e.g., clarify common complaints.")
         if len(categorized_comments["questions"]) > 0:
-            insights.append("Create a FAQ video for viewer questions.")
+            insights.append("Create a FAQ video addressing viewer questions.")
         if sentiment_summary["Positive"] > 60:
-            insights.append("Highlight popular features to maintain engagement.")
+            insights.append("Highlight popular features in future content to maintain engagement.")
+        if not insights:
+            insights.append("Review sentiment analysis and ensure all comments are processed correctly.")
 
         return {
             "summary": summary,
@@ -195,11 +257,11 @@ def generate_content_report(
             "actionable_insights": insights
         }
     except Exception as e:
-        logger.error(f"Cohere report generation error: {e}")
+        logger.error(f"Cohere report generation error: {e}", exc_info=True)
         return {
-            "summary": "Failed to generate report due to API error.",
+            "summary": "Failed to generate report due to API error. Please check Cohere API key or network connection.",
             "sentiment_summary": {"Positive": 0, "Neutral": 0, "Negative": 0},
             "categorized_comments": categorized_comments,
-            "actionable_insights": ["Check API key and retry."]
+            "actionable_insights": ["Check Cohere API key and network connection, then retry."]
         }
     
